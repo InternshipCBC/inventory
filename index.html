@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#2a78d6">
+<title>Office Inventory</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="scrim" id="scrim" onclick="document.body.classList.remove('nav-open')"></div>
+
+<div class="app" id="app">
+  <!-- SIDEBAR -->
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <div class="logo" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7l9-4 9 4-9 4-9-4z"/><path d="M3 7v10l9 4 9-4V7"/><path d="M12 11v10"/></svg>
+      </div>
+      <div>
+        <div class="t" id="brandTitle">Office Inventory</div>
+        <div class="s">Stock &amp; consumption</div>
+      </div>
+    </div>
+    <nav class="nav" id="nav"></nav>
+    <div class="nav-foot">
+      <div class="syncdot" id="syncDot"><span class="dot"></span><span id="syncText">Ready</span></div>
+      <div class="row" style="justify-content:space-between">
+        <button class="btn ghost sm" id="userChip" title="Change name"></button>
+        <button class="iconbtn" id="themeBtn" title="Toggle theme" aria-label="Toggle light/dark theme"></button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <div class="main">
+    <div class="offline-banner">You're offline — viewing saved data. Changes are paused until you're back online.</div>
+    <header class="topbar">
+      <button class="iconbtn menu-btn" id="menuBtn" aria-label="Open menu" onclick="document.body.classList.toggle('nav-open')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+      </button>
+      <div>
+        <div class="page-title" id="pageTitle">Home</div>
+        <div class="page-sub" id="pageSub"></div>
+      </div>
+      <div class="spacer"></div>
+      <button class="btn primary" id="primaryAction" style="display:none"></button>
+    </header>
+    <main class="content" id="view">
+      <div class="loading"><div class="spinner"></div><span>Loading your inventory…</span></div>
+    </main>
+  </div>
+</div>
+
+<!-- MOBILE BOTTOM NAV -->
+<nav class="botnav" id="botnav"></nav>
+
+<!-- MODAL + TOAST MOUNTS -->
+<div id="modalMount"></div>
+<div class="toasts" id="toasts"></div>
+<div class="viz-tip" id="vizTip"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
