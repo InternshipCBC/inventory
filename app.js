@@ -7,7 +7,7 @@
    ===================================================================== */
 
 /* ----------------------------- CONFIG ------------------------------- */
-var API_URL_DEFAULT = "PASTE_YOUR_WEB_APP_URL_HERE";
+var API_URL_DEFAULT = "https://script.google.com/macros/s/AKfycbx3jFSUqDixaKHdeIBeYKlt3PyEmQP-r868k1bx5fQ1RaPLEEG40WfqUNudjIO9ov7AXA/exec";
 var API_URL = (function () {
   var s = localStorage.getItem("inv_api_url");
   return (s && s.indexOf("http") === 0) ? s : (API_URL_DEFAULT.indexOf("http") === 0 ? API_URL_DEFAULT : "");
