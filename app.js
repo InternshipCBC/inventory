@@ -7,7 +7,7 @@
 /* ----------------------------- CONFIG ------------------------------- */
 /* Paste your deployed Apps Script Web App URL below (or set it once in
    Settings > Connection inside the app). It ends in /exec              */
-var API_URL_DEFAULT = "PASTE_YOUR_WEB_APP_URL_HERE";
+var API_URL_DEFAULT = "https://script.google.com/macros/s/AKfycbx3jFSUqDixaKHdeIBeYKlt3PyEmQP-r868k1bx5fQ1RaPLEEG40WfqUNudjIO9ov7AXA/exec";
 
 var API_URL = (function () {
   var saved = localStorage.getItem("inv_api_url");
