@@ -7,7 +7,7 @@
    ===================================================================== */
 
 /* ----------------------------- CONFIG ------------------------------- */
-var API_URL_DEFAULT = "https://script.google.com/macros/s/AKfycbx3jFSUqDixaKHdeIBeYKlt3PyEmQP-r868k1bx5fQ1RaPLEEG40WfqUNudjIO9ov7AXA/exec";
+var API_URL_DEFAULT = "PASTE_YOUR_WEB_APP_URL_HERE";
 var API_URL = (function () {
   var s = localStorage.getItem("inv_api_url");
   return (s && s.indexOf("http") === 0) ? s : (API_URL_DEFAULT.indexOf("http") === 0 ? API_URL_DEFAULT : "");
@@ -61,15 +61,12 @@ function addDays(dateStr, days) { var d = toDate(dateStr) || new Date(); var n =
 function addMonths(dateStr, months) { return addDays(dateStr, Math.round(num(months) * 30)); }
 
 /* --- periods as Months & Days (30-day months) --- */
-function fmtPeriod(months, compact) {
+function fmtPeriod(months) {
+  /* compact everywhere to save space: e.g. 2M15D, 15D, 3M */
   var totalDays = Math.round(num(months) * 30);
-  if (totalDays <= 0) return compact ? '0D' : '0 Days';
+  if (totalDays <= 0) return '0D';
   var m = Math.floor(totalDays / 30), d = totalDays - m * 30;
-  if (compact) return (m ? m + 'M' : '') + (d ? d + 'D' : '');
-  var parts = [];
-  if (m) parts.push(m + ' Month' + (m > 1 ? 's' : ''));
-  if (d) parts.push(d + ' Day' + (d > 1 ? 's' : ''));
-  return parts.join(' & ');
+  return (m ? m + 'M' : '') + (d ? d + 'D' : '');
 }
 function monthsFromMD(m, d) { return num(m) + num(d) / 30; }
 
@@ -398,7 +395,7 @@ function updatePrimary() {
   var map = {
     overview: ['Add item', function () { itemForm(); }],
     record: ['Quick count', function () { startQuickCount(); }],
-    orders: ['New order', function () { orderForm(); }],
+    orders: ['New order', function () { orderBuilder(); }],
     suppliers: ['Add supplier', function () { supplierForm(); }],
     required: ['Order all', function () { orderFromRequired(); }]
   };
@@ -483,7 +480,7 @@ function viewHome(v) {
   html += '<div class="row" style="margin-bottom:16px"><button class="btn primary" id="qc">' + ICON('record', 16) + 'Record consumption</button><button class="btn" id="qo">' + ICON('orders', 16) + 'New order</button><button class="btn" id="qov">' + ICON('overview', 16) + 'Overview</button></div>';
   html += '<div class="charts-grid">' + chartBox('Consumption value — last 6 months', 'Estimated value of items used', lineChartSVG(consumptionValueSeries(6), { color: 'var(--s1)', money: true })) + chartBox('Spend — last 6 months', 'From received orders', barChartSVG(spendSeries(6), { color: 'var(--s2)', money: true })) + '</div>';
   v.innerHTML = html;
-  $('#goReq').onclick = function () { setTab('required'); }; $('#qc').onclick = function () { setTab('record'); }; $('#qo').onclick = function () { orderForm(); }; $('#qov').onclick = function () { setTab('overview'); };
+  $('#goReq').onclick = function () { setTab('required'); }; $('#qc').onclick = function () { setTab('record'); }; $('#qo').onclick = function () { orderBuilder(); }; $('#qov').onclick = function () { setTab('overview'); };
   $all('.alert-item[data-item]', v).forEach(function (a) { a.onclick = function () { itemDetail(a.dataset.item); }; });
   $all('.alert-item[data-order]', v).forEach(function (a) { a.onclick = function () { orderDetail(a.dataset.order); }; });
   wireCharts(v);
@@ -538,6 +535,7 @@ function sortItems(col, dir) {
       case 'value': av = da.value; bv = db.value; break;
       case 'last': av = toDate(da.lastCount) ? toDate(da.lastCount).getTime() : 0; bv = toDate(db.lastCount) ? toDate(db.lastCount).getTime() : 0; break;
       case 'cat': av = (a.subcategory || '').toLowerCase(); bv = (b.subcategory || '').toLowerCase(); break;
+      case 'supplier': av = ((supplierById(a.supplierId) || {}).name || '').toLowerCase(); bv = ((supplierById(b.supplierId) || {}).name || '').toLowerCase(); break;
       case 'status': av = statusRank(da.status); bv = statusRank(db.status); break;
       default: av = a.name.toLowerCase(); bv = b.name.toLowerCase();
     }
@@ -548,24 +546,25 @@ function renderItemRows(key) {
   var rows = currentItemRows(key), sort = getUI(key + '_sort', { col: 'name', dir: 'asc' }), box = $('#' + key + '_res');
   if (!rows.length) { box.innerHTML = emptyState('search', 'No items match', 'Clear the search/filters, or use “Add item”.'); return; }
   function sh(col, label, cls) { var ind = sort.col === col ? '<span class="sort-ind">' + (sort.dir === 'asc' ? '▲' : '▼') + '</span>' : ''; return '<th class="sortable ' + (cls || '') + '" data-col="' + col + '">' + esc(label) + ind + '</th>'; }
-  var t = '<div class="table-wrap desktop-only"><table class="grid"><thead><tr>' + sh('name', 'Item') + sh('cat', 'Category') + sh('stock', 'Stock', 'num') + sh('usage', 'Use / mo', 'num') + sh('cover', 'Cover', 'num') + '<th>Need</th>' + sh('status', 'Status') + sh('value', 'Value', 'num') + sh('last', 'Last count') + '</tr></thead><tbody>';
+  var t = '<div class="table-wrap desktop-only"><table class="grid"><thead><tr>' + sh('name', 'Item') + sh('cat', 'Category') + sh('supplier', 'Supplier') + sh('stock', 'Stock', 'num') + sh('usage', 'Use / mo', 'num') + sh('cover', 'Cover', 'num') + '<th>Need</th>' + sh('status', 'Status') + sh('value', 'Value', 'num') + sh('last', 'Last count') + '</tr></thead><tbody>';
   rows.forEach(function (it) {
-    var dd = D(it.id);
+    var dd = D(it.id), sup = supplierById(it.supplierId);
     t += '<tr data-id="' + esc(it.id) + '"><td><div class="item-name">' + esc(it.name) + '</div>' + (it.brand ? '<div class="item-meta">' + esc(it.brand) + '</div>' : '') + '</td>' +
       '<td><span class="chip">' + esc(it.subcategory || '—') + '</span></td>' +
+      '<td class="item-meta nowrap">' + (sup ? esc(clip(sup.name, 18)) : '<span class="muted">—</span>') + '</td>' +
       '<td class="num"><b>' + fmtNum(dd.current) + '</b> <span class="muted">' + esc(dd.su) + '</span>' + stockMini(it, dd) + '</td>' +
       '<td class="num">' + (dd.actualRate ? fmtNum(dd.actualRate) : '<span class="muted">—</span>') + '</td>' +
-      '<td class="num">' + (dd.daysCover != null ? fmtPeriod(dd.daysCover / 30, true) : '<span class="muted">—</span>') + '</td>' +
-      '<td class="nowrap">' + esc(needStr(it, false)) + '</td>' +
+      '<td class="num">' + (dd.daysCover != null ? fmtPeriod(dd.daysCover / 30) : '<span class="muted">—</span>') + '</td>' +
+      '<td class="nowrap">' + esc(needStr(it)) + '</td>' +
       '<td>' + pill(dd.status) + '</td>' +
       '<td class="num">' + (dd.value ? money(dd.value) : '<span class="muted">—</span>') + '</td>' +
       '<td class="nowrap muted">' + fmtDateShort(dd.lastCount) + '</td></tr>';
   });
   t += '</tbody></table></div><div class="cards-list mobile-only">';
   rows.forEach(function (it) {
-    var dd = D(it.id);
+    var dd = D(it.id), sup = supplierById(it.supplierId);
     t += '<div class="rowcard" data-id="' + esc(it.id) + '"><div class="rc-top"><div class="grow"><div class="item-name">' + esc(it.name) + '</div><div class="item-meta">' + esc((it.brand ? it.brand + ' · ' : '') + (it.subcategory || '')) + '</div></div>' + pill(dd.status) + '</div>' +
-      '<div class="rc-meta"><span>Stock <b>' + fmtNum(dd.current) + ' ' + esc(dd.su) + '</b></span><span>Need <b>' + esc(needStr(it, true)) + '</b></span><span>Use/mo <b>' + (dd.actualRate ? fmtNum(dd.actualRate) : '—') + '</b></span>' + (dd.daysCover != null ? '<span>Cover <b>' + fmtPeriod(dd.daysCover / 30, true) + '</b></span>' : '') + '</div></div>';
+      '<div class="rc-meta"><span>Stock <b>' + fmtNum(dd.current) + ' ' + esc(dd.su) + '</b></span><span>Need <b>' + esc(needStr(it)) + '</b></span><span>Use/mo <b>' + (dd.actualRate ? fmtNum(dd.actualRate) : '—') + '</b></span>' + (dd.daysCover != null ? '<span>Cover <b>' + fmtPeriod(dd.daysCover / 30) + '</b></span>' : '') + (sup ? '<span>Supplier <b>' + esc(sup.name) + '</b></span>' : '') + '</div></div>';
   });
   t += '</div>';
   box.innerHTML = t;
@@ -639,8 +638,8 @@ function viewRequired(v) {
 function orderFromRequired() {
   var list = itemsIn(S.sub).filter(function (it) { return D(it.id).needsOrder; });
   if (!list.length) { toast('Nothing to order.', 'warn'); return; }
-  var lines = list.map(function (it) { var dd = D(it.id); return { itemId: it.id, name: it.name, unit: dd.su, qty: round(dd.suggested, 2), unitPrice: dd.price || '', amount: (dd.suggested * (dd.price || 0)) || '' }; });
-  orderForm(null, lines);
+  var lines = list.map(function (it) { var dd = D(it.id); return { itemId: it.id, name: it.name, unit: dd.su, qty: round(dd.suggested, 2), unitPrice: dd.price || '', supplierId: it.supplierId || '' }; });
+  orderBuilder(lines);
 }
 
 /* =================================================================== */
@@ -662,7 +661,7 @@ function viewAddl(v) {
   });
   t += '</div>'; box.innerHTML = t;
   $all('[data-open]', box).forEach(function (b) { b.onclick = function () { itemDetail(b.dataset.open); }; });
-  $all('[data-add]', box).forEach(function (b) { b.onclick = function () { var x = list.filter(function (y) { return y.it.id === b.dataset.add; })[0]; if (!x) return; orderForm(null, [{ itemId: x.it.id, name: x.it.name, unit: D(x.it.id).su, qty: round(x.qty, 2), unitPrice: D(x.it.id).price || '', amount: (x.qty * (D(x.it.id).price || 0)) || '' }]); }; });
+  $all('[data-add]', box).forEach(function (b) { b.onclick = function () { var x = list.filter(function (y) { return y.it.id === b.dataset.add; })[0]; if (!x) return; orderBuilder([{ itemId: x.it.id, name: x.it.name, unit: D(x.it.id).su, qty: round(x.qty, 2), unitPrice: D(x.it.id).price || '', supplierId: x.it.supplierId || '' }]); }; });
 }
 
 /* =================================================================== */
@@ -1141,6 +1140,83 @@ function orderForm(order, presetLines) {
     var rec = Object.assign({}, order, { date: $('#o_date', m).value || today(), status: status, supplierId: supId, supplierName: sup ? sup.name : (order.supplierName || ''), linesJSON: JSON.stringify(clean), subtotal: m._sub, taxPct: num($('#o_tax', m).value), taxAmt: m._tax, delivery: num($('#o_deliv', m).value), discount: num($('#o_disc', m).value), total: m._total, invoiceNo: $('#o_inv', m).value.trim(), notes: $('#o_notes', m).value.trim(), orderedBy: $('#o_by', m).value.trim() || S.user, receivedDate: $('#o_recv', m).value || (status === 'Received' ? today() : (order.receivedDate || '')) });
     if (isNew) rec.id = uid('ORD');
     closeModal(); persist('Orders', rec, isNew).then(function () { toast('Order saved' + (status === 'Received' ? ' & added to stock' : ''), 'ok'); });
+  };
+}
+/* ---- ORDER BUILDER: creates one order PER supplier, items grouped ---- */
+function orderBuilder(seedLines) {
+  var its = S.items.filter(function (i) { return String(i.active) !== 'false'; }).sort(by('name'));
+  var sups = S.suppliers.slice().sort(by('name'));
+  var lines = (seedLines && seedLines.length ? seedLines : [{ itemId: '', qty: '', unitPrice: '' }]).map(function (l) {
+    var it = itemById(l.itemId);
+    return { itemId: l.itemId || '', name: l.name || (it ? it.name : ''), unit: l.unit || (it ? stockUnitOf(it) : ''), qty: l.qty != null ? l.qty : '', unitPrice: l.unitPrice != null ? l.unitPrice : (it && D(it.id).price ? round(D(it.id).price, 2) : ''), supplierId: l.supplierId != null ? l.supplierId : (it ? (it.supplierId || '') : '') };
+  });
+  var html = '<div class="modal-h">' + ICON('orders', 20) + '<h3>New order(s)</h3><button class="iconbtn" data-x>' + ICON('x', 17) + '</button></div><div class="modal-b">' +
+    '<div class="hint" style="margin-top:0">Items are grouped by their supplier — <b>one order is created per supplier</b>. Change any item\'s supplier below (individually, or tick several and use “Assign selected”).</div>' +
+    '<div class="form-grid mt16">' +
+    field('Status (all)', '<select id="ob_status">' + opts(['Draft', 'Ordered', 'Received', 'Cancelled'], 'Ordered') + '</select>', 'Received adds quantities to stock.') +
+    field('Order date (all)', '<input id="ob_date" type="date" value="' + today() + '">') +
+    field('Received date', '<input id="ob_recv" type="date">', 'Used only if status is Received.') +
+    field('Notes (all)', '<input id="ob_notes">') +
+    '</div>' +
+    '<div class="row mt16" style="align-items:center;gap:8px"><button class="btn sm" id="ob_add">' + ICON('plus', 14) + 'Add item</button><span style="flex:1"></span><span class="hint" style="margin:0">Assign ticked to:</span><select id="ob_bulksup" style="width:auto;min-width:150px"><option value="">— supplier —</option>' + sups.map(function (s) { return '<option value="' + esc(s.id) + '">' + esc(s.name) + '</option>'; }).join('') + '<option value="__none">(no supplier)</option></select><button class="btn sm" id="ob_assign">Assign selected</button></div>' +
+    '<div id="ob_groups"></div>' +
+    '<div class="card mt16" style="box-shadow:none"><div class="card-b" id="ob_foot" style="padding:10px 16px"></div></div>' +
+    '</div><div class="modal-f"><button class="btn ghost" data-x>Cancel</button><button class="btn primary" data-ok></button></div>';
+  var m = openModal(html, { wide: true });
+
+  function unitOpts(it, sel) { var lv = it ? unitsOf(it) : []; if (!lv.length) return '<option value="">—</option>'; return lv.map(function (u) { return '<option' + (u === sel ? ' selected' : '') + '>' + esc(u) + '</option>'; }).join(''); }
+  function supOpts(sel) { return '<option value="">— none —</option>' + sups.map(function (s) { return '<option value="' + esc(s.id) + '"' + (s.id === sel ? ' selected' : '') + '>' + esc(s.name) + '</option>'; }).join(''); }
+  function lineRow(i) {
+    var ln = lines[i], it = itemById(ln.itemId);
+    return '<tr data-li="' + i + '"><td><input type="checkbox" class="ob_sel" data-i="' + i + '" style="width:auto"></td>' +
+      '<td><select class="ob_item" data-i="' + i + '"><option value="">— item —</option>' + its.map(function (x) { return '<option value="' + esc(x.id) + '"' + (x.id === ln.itemId ? ' selected' : '') + '>' + esc(x.name) + '</option>'; }).join('') + '</select></td>' +
+      '<td><select class="ob_unit" data-i="' + i + '">' + unitOpts(it, ln.unit) + '</select></td>' +
+      '<td><input class="ob_qty" data-i="' + i + '" type="number" inputmode="decimal" value="' + esc(ln.qty) + '"></td>' +
+      '<td><input class="ob_price" data-i="' + i + '" type="number" inputmode="decimal" value="' + esc(ln.unitPrice) + '"></td>' +
+      '<td class="num ob_amt">' + money(num(ln.qty) * num(ln.unitPrice)) + '</td>' +
+      '<td><select class="ob_sup" data-i="' + i + '">' + supOpts(ln.supplierId) + '</select></td>' +
+      '<td><button class="iconbtn" data-rm="' + i + '" style="width:30px;height:30px">' + ICON('x', 15) + '</button></td></tr>';
+  }
+  function groupsOf() { var g = {}; lines.forEach(function (ln, i) { (g[ln.supplierId || ''] = g[ln.supplierId || ''] || []).push(i); }); return g; }
+  function draw() {
+    var g = groupsOf(), keys = Object.keys(g).sort(function (a, b) { if (a === '') return 1; if (b === '') return -1; var an = (supplierById(a) || {}).name || '', bn = (supplierById(b) || {}).name || ''; return an.toLowerCase() < bn.toLowerCase() ? -1 : 1; });
+    var html = '';
+    keys.forEach(function (k) {
+      var sname = k ? ((supplierById(k) || {}).name || 'Unknown') : 'Unassigned';
+      html += '<div class="section-title mt16" style="text-transform:none;letter-spacing:0;font-size:13px;display:flex;justify-content:space-between;align-items:center"><span>' + ICON('suppliers', 14) + ' ' + esc(sname) + ' · ' + g[k].length + ' item(s)</span><span class="tabnum" id="gsub_' + cssid(k || 'none') + '"></span></div>' +
+        '<div class="table-wrap" style="box-shadow:none"><table class="lines-tbl"><thead><tr><th style="width:24px"></th><th style="min-width:130px">Item</th><th style="width:62px">Unit</th><th style="width:58px">Qty</th><th style="width:74px">Price</th><th style="width:74px" class="num">Amount</th><th style="width:130px">Supplier</th><th style="width:30px"></th></tr></thead><tbody>' +
+        g[k].map(function (i) { return lineRow(i); }).join('') + '</tbody></table></div>';
+    });
+    $('#ob_groups', m).innerHTML = html;
+    $all('.ob_item', m).forEach(function (s) { s.onchange = function () { var i = +s.dataset.i; lines[i].itemId = s.value; var it = itemById(s.value); if (it) { lines[i].name = it.name; lines[i].unit = stockUnitOf(it); if (!num(lines[i].unitPrice) && D(it.id).price) lines[i].unitPrice = round(D(it.id).price, 2); if (!lines[i].supplierId) lines[i].supplierId = it.supplierId || ''; } draw(); }; });
+    $all('.ob_unit', m).forEach(function (s) { s.onchange = function () { lines[+s.dataset.i].unit = s.value; totals(); }; });
+    $all('.ob_sup', m).forEach(function (s) { s.onchange = function () { lines[+s.dataset.i].supplierId = s.value; draw(); }; });
+    $all('.ob_qty', m).forEach(function (inp) { inp.oninput = function () { lines[+inp.dataset.i].qty = inp.value; rowAmt(+inp.dataset.i); totals(); }; });
+    $all('.ob_price', m).forEach(function (inp) { inp.oninput = function () { lines[+inp.dataset.i].unitPrice = inp.value; rowAmt(+inp.dataset.i); totals(); }; });
+    $all('[data-rm]', m).forEach(function (b) { b.onclick = function () { lines.splice(+b.dataset.rm, 1); if (!lines.length) lines.push({ itemId: '', qty: '', unitPrice: '', supplierId: '' }); draw(); }; });
+    totals();
+  }
+  function rowAmt(i) { var tr = $('[data-li="' + i + '"]', m); if (tr) $('.ob_amt', tr).textContent = money(num(lines[i].qty) * num(lines[i].unitPrice)); }
+  function totals() {
+    var g = groupsOf(), grand = 0, nOrders = 0;
+    Object.keys(g).forEach(function (k) { var sub = g[k].reduce(function (a, i) { return a + num(lines[i].qty) * num(lines[i].unitPrice); }, 0); grand += sub; var costed = g[k].some(function (i) { return lines[i].itemId && num(lines[i].qty) > 0; }); if (costed) nOrders++; var el = $('#gsub_' + cssid(k || 'none'), m); if (el) el.textContent = money(sub); });
+    $('#ob_foot', m).innerHTML = '<div class="detail-row"><span class="k">Suppliers (orders to create)</span><span class="v">' + nOrders + '</span></div><div class="detail-row"><span class="k">Grand total</span><span class="v" style="font-size:17px;color:var(--accent)">' + money(grand) + '</span></div>';
+    $('[data-ok]', m).textContent = 'Create ' + nOrders + ' order' + (nOrders === 1 ? '' : 's');
+  }
+  draw();
+  $('#ob_add', m).onclick = function () { lines.push({ itemId: '', qty: '', unitPrice: '', supplierId: '' }); draw(); };
+  $('#ob_assign', m).onclick = function () { var sup = $('#ob_bulksup', m).value; if (!sup) { toast('Pick a supplier to assign', 'warn'); return; } var any = false; $all('.ob_sel', m).forEach(function (cb) { if (cb.checked) { lines[+cb.dataset.i].supplierId = (sup === '__none' ? '' : sup); any = true; } }); if (!any) { toast('Tick some items first', 'warn'); return; } draw(); };
+  $all('[data-x]', m).forEach(function (b) { b.onclick = closeModal; });
+  $('[data-ok]', m).onclick = function () {
+    var status = $('#ob_status', m).value, odate = $('#ob_date', m).value || today(), recv = $('#ob_recv', m).value, notes = $('#ob_notes', m).value.trim();
+    var g = {}; lines.forEach(function (ln) { if (!ln.itemId || !(num(ln.qty) > 0)) return; (g[ln.supplierId || ''] = g[ln.supplierId || ''] || []).push(ln); });
+    var keys = Object.keys(g); if (!keys.length) { toast('Add at least one item with quantity', 'err'); return; }
+    var orders = keys.map(function (k) {
+      var gl = g[k].map(function (ln) { var it = itemById(ln.itemId); return { itemId: ln.itemId, name: it ? it.name : ln.name, unit: ln.unit || (it ? stockUnitOf(it) : ''), qty: num(ln.qty), unitPrice: num(ln.unitPrice), amount: num(ln.qty) * num(ln.unitPrice) }; });
+      var sub = gl.reduce(function (a, l) { return a + l.amount; }, 0), sup = supplierById(k);
+      return { id: uid('ORD'), date: odate, status: status, supplierId: k, supplierName: sup ? sup.name : '', linesJSON: JSON.stringify(gl), subtotal: sub, taxPct: 0, taxAmt: 0, delivery: 0, discount: 0, total: sub, invoiceNo: '', notes: notes, orderedBy: S.user, expectedDate: '', receivedDate: (status === 'Received' ? (recv || today()) : recv) };
+    });
+    closeModal(); persistBulk('Orders', orders).then(function () { toast('Created ' + orders.length + ' order(s)' + (status === 'Received' ? ' & added to stock' : ''), 'ok'); setTab('orders'); });
   };
 }
 function orderDetail(oid) {
