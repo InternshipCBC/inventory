@@ -7,7 +7,7 @@
    ===================================================================== */
 
 /* ----------------------------- CONFIG ------------------------------- */
-var API_URL_DEFAULT = "https://script.google.com/macros/s/AKfycbx3jFSUqDixaKHdeIBeYKlt3PyEmQP-r868k1bx5fQ1RaPLEEG40WfqUNudjIO9ov7AXA/exec";
+var API_URL_DEFAULT = "PASTE_YOUR_WEB_APP_URL_HERE";
 var API_URL = (function () {
   var s = localStorage.getItem("inv_api_url");
   return (s && s.indexOf("http") === 0) ? s : (API_URL_DEFAULT.indexOf("http") === 0 ? API_URL_DEFAULT : "");
@@ -188,6 +188,24 @@ function persistBulk(entity, records) {
   return apiPost({ action: 'bulkCreate', entity: entity, records: records })
     .then(function (res) { if (res.error) throw new Error(res.error); S.pending--; setSync('ok', 'Saved'); reconcileSoon(); return res.records; })
     .catch(function (e) { S.pending--; setSync('err', 'Save failed'); toast('Save failed — refreshing.', 'err'); loadData(false); throw e; });
+}
+function persistManyUpdate(entity, records) {
+  if (!apiConfigured() || S.offline) { toast('You are offline — cannot save now.', 'err'); return Promise.reject(); }
+  if (!records.length) return Promise.resolve();
+  records.forEach(function (r) { applyLocal(entity, r, 'update'); }); afterLocalChange();
+  S.pending++; setSync('busy', 'Saving…');
+  return apiPost({ action: 'bulkUpdate', entity: entity, records: records })
+    .then(function (res) { if (res.error) throw new Error(res.error); S.pending--; setSync('ok', 'Saved'); reconcileSoon(); })
+    .catch(function (e) { S.pending--; setSync('err', 'Save failed'); toast('Save failed — refreshing.', 'err'); loadData(false); throw e; });
+}
+function persistManyDelete(entity, ids) {
+  if (!apiConfigured() || S.offline) { toast('You are offline — cannot delete now.', 'err'); return Promise.reject(); }
+  if (!ids.length) return Promise.resolve();
+  ids.forEach(function (id) { applyLocal(entity, id, 'delete'); }); afterLocalChange();
+  S.pending++; setSync('busy', 'Deleting…');
+  return apiPost({ action: 'bulkDelete', entity: entity, ids: ids })
+    .then(function (res) { if (res.error) throw new Error(res.error); S.pending--; setSync('ok', 'Deleted'); reconcileSoon(); })
+    .catch(function (e) { S.pending--; setSync('err', 'Delete failed'); toast('Delete failed — refreshing.', 'err'); loadData(false); throw e; });
 }
 function saveSetting(key, value) {
   S.settings[key] = value;
@@ -415,6 +433,27 @@ function addToList(key, val) { if (!val) return; var a = listVal(key).slice(); i
 function removeFromList(key, val) { saveSetting(key, listVal(key).filter(function (x) { return x !== val; })); }
 function unitSystems() { var v = S.settings.unitSystems; if (Array.isArray(v)) return v; try { var p = JSON.parse(v); return Array.isArray(p) ? p : []; } catch (e) { return []; } }
 
+/* ---- cascade helpers: keep the whole dashboard in step with Settings edits ---- */
+function applyUnitRename(map, itemFilter) {
+  var itemsCh = [], consCh = [], ordCh = [], ids = {};
+  S.items.forEach(function (it) {
+    if (!itemFilter(it)) return; ids[it.id] = 1;
+    var f = factorsOf(it), nf = {}; Object.keys(f).forEach(function (k) { nf[map[k] || k] = f[k]; }); it.factorsJSON = JSON.stringify(nf);
+    ['stockUnit', 'baseUnit', 'needUnit', 'unit'].forEach(function (k) { if (it[k] && map[it[k]]) it[k] = map[it[k]]; });
+    itemsCh.push(it);
+  });
+  S.consumption.forEach(function (c) { if (ids[c.itemId] && c.unit && map[c.unit]) { c.unit = map[c.unit]; consCh.push(c); } });
+  S.orders.forEach(function (o) { var lines = parseLines(o.linesJSON), ch = false; lines.forEach(function (ln) { if (ids[ln.itemId] && ln.unit && map[ln.unit]) { ln.unit = map[ln.unit]; ch = true; } }); if (ch) { o.linesJSON = JSON.stringify(lines); ordCh.push(o); } });
+  commitCascade(itemsCh, consCh, ordCh);
+}
+function commitCascade(itemsCh, consCh, ordCh) {
+  if (itemsCh && itemsCh.length) persistManyUpdate('Items', itemsCh);
+  if (consCh && consCh.length) persistManyUpdate('Consumption', consCh);
+  if (ordCh && ordCh.length) persistManyUpdate('Orders', ordCh);
+}
+function renameSubcatEverywhere(oldV, newV) { var ch = []; S.items.forEach(function (it) { if (it.subcategory === oldV) { it.subcategory = newV; ch.push(it); } }); commitCascade(ch); }
+function renamePersonEverywhere(oldV, newV) { var c = [], o = []; S.consumption.forEach(function (x) { if (x.enteredBy === oldV) { x.enteredBy = newV; c.push(x); } }); S.orders.forEach(function (x) { if (x.orderedBy === oldV) { x.orderedBy = newV; o.push(x); } }); commitCascade(null, c, o); }
+
 /* =================================================================== */
 /*  HOME                                                               */
 /* =================================================================== */
@@ -464,13 +503,15 @@ function viewOverview(v) {
   var html = subtabBar(counts) +
     '<div class="toolbar"><div class="search grow">' + ICON('search', 16) + '<input id="' + key + '_q" placeholder="Search items…" autocomplete="off"></div>' +
     '<select id="' + key + '_status" style="width:auto;min-width:130px"><option value="">All statuses</option><option value="need">Needs order</option><option value="out">Out of stock</option><option value="ok">OK</option></select>' +
-    '<select id="' + key + '_cat" style="width:auto;min-width:150px"></select></div><div id="' + key + '_res"></div>';
+    '<select id="' + key + '_cat" style="width:auto;min-width:150px"></select>' +
+    '<button class="btn" id="ov_bulk">' + ICON('layers', 16) + 'Bulk</button></div><div id="' + key + '_res"></div>';
   v.innerHTML = html;
   wireSubtabs(v);
   $('#' + key + '_cat').innerHTML = '<option value="">All sub-categories</option>' + subcatsFor(S.sub).map(function (s) { return '<option>' + esc(s) + '</option>'; }).join('');
   var refresh = function () { renderItemRows(key); };
   $('#' + key + '_q').addEventListener('input', debounce(refresh, 200));
   $('#' + key + '_status').onchange = refresh; $('#' + key + '_cat').onchange = refresh;
+  $('#ov_bulk').onclick = function () { bulkOpen('Items', currentItemRows(key), itemBulkLabel); };
   refresh();
 }
 function currentItemRows(key) {
@@ -537,11 +578,16 @@ function stockMini(it, dd) { if (!dd.needBase) return ''; var pct = Math.min(100
 /*  RECORD CONSUMPTION                                                 */
 /* =================================================================== */
 function viewRecord(v) {
-  var html = subtabBar() + '<div class="row" style="margin-bottom:14px"><button class="btn primary" id="quickCountBtn">' + ICON('record', 16) + 'Quick weekly count</button><button class="btn" id="singleEntryBtn">' + ICON('plus', 16) + 'Single entry</button></div>';
+  var html = subtabBar() + '<div class="row" style="margin-bottom:14px"><button class="btn primary" id="quickCountBtn">' + ICON('record', 16) + 'Quick weekly count</button><button class="btn" id="singleEntryBtn">' + ICON('plus', 16) + 'Single entry</button><button class="btn" id="rec_bulk">' + ICON('layers', 16) + 'Bulk</button></div>';
   html += '<div class="card"><div class="card-h">' + ICON('clock', 18) + '<h3>Recent entries — ' + esc(S.sub) + '</h3></div><div class="card-b" id="rec_log"></div></div>';
   v.innerHTML = html; wireSubtabs(v);
   $('#quickCountBtn').onclick = startQuickCount; $('#singleEntryBtn').onclick = function () { consumptionForm(); };
+  $('#rec_bulk').onclick = function () { bulkOpen('Consumption', currentConsumptionFiltered(), function (c) { var it = itemById(c.itemId) || {}; var u = c.unit || ''; var lab = c.mode === 'used' ? 'Used ' + fmtNum(c.value) : c.mode === 'added' ? 'Added ' + fmtNum(c.value) : 'Counted ' + fmtNum(c.value) + ' left'; return { title: it.name || '—', sub: lab + ' ' + u + ' · ' + fmtDateShort(c.date) + ' · ' + (c.enteredBy || '') }; }); };
   renderConsumptionLog();
+}
+function currentConsumptionFiltered() {
+  var ids = {}; itemsIn(S.sub).forEach(function (it) { ids[it.id] = it; });
+  return S.consumption.filter(function (c) { return ids[c.itemId]; }).sort(function (a, b) { return (toDate(b.date) || 0) - (toDate(a.date) || 0) || (toDate(b.createdAt) || 0) - (toDate(a.createdAt) || 0); });
 }
 function renderConsumptionLog() {
   var box = $('#rec_log'); if (!box) return;
@@ -579,9 +625,10 @@ function viewRequired(v) {
   var list = itemsIn(S.sub).filter(function (it) { return D(it.id).needsOrder; }).sort(function (a, b) { return statusRank(D(a.id).status) - statusRank(D(b.id).status) || ((D(a.id).daysCover == null ? 9999 : D(a.id).daysCover) - (D(b.id).daysCover == null ? 9999 : D(b.id).daysCover)); });
   var totalEst = 0; list.forEach(function (it) { totalEst += D(it.id).suggestedBase * D(it.id).perBase || 0; });
   var html = subtabBar(counts) + '<div class="kpis"><div class="kpi danger"><div class="l">Items to order</div><div class="v">' + list.length + '</div><div class="d">in ' + esc(S.sub) + '</div></div><div class="kpi accent"><div class="l">Estimated cost</div><div class="v">' + money(totalEst) + '</div><div class="d">at latest prices</div></div></div>';
-  if (list.length) html += '<div class="row" style="margin-bottom:14px"><button class="btn primary" id="orderAll">' + ICON('orders', 16) + 'Create order from this list</button></div>';
+  if (list.length) html += '<div class="row" style="margin-bottom:14px"><button class="btn primary" id="orderAll">' + ICON('orders', 16) + 'Create order from this list</button><button class="btn" id="req_bulk">' + ICON('layers', 16) + 'Bulk edit</button></div>';
   html += '<div id="req_res"></div>'; v.innerHTML = html; wireSubtabs(v);
   if ($('#orderAll')) $('#orderAll').onclick = orderFromRequired;
+  if ($('#req_bulk')) $('#req_bulk').onclick = function () { bulkOpen('Items', list, itemBulkLabel); };
   var box = $('#req_res');
   if (!list.length) { box.innerHTML = emptyState('check', 'Nothing to order in ' + S.sub, 'All items are above their reorder level.'); return; }
   var t = '<div class="cards-list">';
@@ -624,19 +671,25 @@ function viewAddl(v) {
 function viewOrders(v) {
   var orders = S.orders.slice().sort(function (a, b) { return (toDate(b.date) || 0) - (toDate(a.date) || 0); });
   var counts = {}; CATS.forEach(function (c) { counts[c] = orders.filter(function (o) { return orderTouchesCat(o, c); }).length; });
-  var html = subtabBar(counts) + '<div class="toolbar"><div class="search grow">' + ICON('search', 16) + '<input id="ord_q" placeholder="Search supplier, invoice…"></div><select id="ord_status" style="width:auto;min-width:150px"><option value="">All statuses</option><option>Draft</option><option>Ordered</option><option>Received</option><option>Cancelled</option></select></div>';
+  var html = subtabBar(counts) + '<div class="toolbar"><div class="search grow">' + ICON('search', 16) + '<input id="ord_q" placeholder="Search supplier, invoice…"></div><select id="ord_status" style="width:auto;min-width:150px"><option value="">All statuses</option><option>Draft</option><option>Ordered</option><option>Received</option><option>Cancelled</option></select><button class="btn" id="ord_bulk">' + ICON('layers', 16) + 'Bulk</button></div>';
   var totalSpend = orders.filter(function (o) { return o.status === 'Received'; }).reduce(function (s, o) { return s + num(o.total); }, 0);
   html += '<div class="kpis"><div class="kpi"><div class="l">Total orders</div><div class="v">' + orders.length + '</div></div><div class="kpi accent"><div class="l">Received value</div><div class="v">' + money(totalSpend) + '</div></div></div><div id="ord_res"></div>';
   v.innerHTML = html; wireSubtabs(v);
   var refresh = function () { renderOrders(); };
-  $('#ord_q').addEventListener('input', debounce(refresh, 200)); $('#ord_status').onchange = refresh; refresh();
+  $('#ord_q').addEventListener('input', debounce(refresh, 200)); $('#ord_status').onchange = refresh;
+  $('#ord_bulk').onclick = function () { bulkOpen('Orders', currentOrdersFiltered(), function (o) { return { title: o.supplierName || 'Order', sub: fmtDate(o.date) + ' · ' + money(o.total) + ' · ' + (o.status || '') }; }); };
+  refresh();
 }
 function orderTouchesCat(o, cat) { return parseLines(o.linesJSON).some(function (ln) { var it = itemById(ln.itemId); return it && it.category === cat; }); }
-function renderOrders() {
-  var q = ($('#ord_q').value || '').toLowerCase().trim(), st = $('#ord_status').value;
+function currentOrdersFiltered() {
+  var q = ($('#ord_q') && $('#ord_q').value || '').toLowerCase().trim(), st = $('#ord_status') ? $('#ord_status').value : '';
   var orders = S.orders.filter(function (o) { return orderTouchesCat(o, S.sub) || parseLines(o.linesJSON).length === 0; }).sort(function (a, b) { return (toDate(b.date) || 0) - (toDate(a.date) || 0); });
   if (q) orders = orders.filter(function (o) { return ((o.supplierName || '') + ' ' + (o.invoiceNo || '') + ' ' + (o.notes || '')).toLowerCase().indexOf(q) >= 0; });
   if (st) orders = orders.filter(function (o) { return o.status === st; });
+  return orders;
+}
+function renderOrders() {
+  var orders = currentOrdersFiltered();
   var box = $('#ord_res');
   if (!orders.length) { box.innerHTML = emptyState('orders', 'No orders yet', 'Use “New order” to record what you buy.'); return; }
   var t = '<div class="table-wrap desktop-only"><table class="grid"><thead><tr><th>Date</th><th>Supplier</th><th>Items</th><th class="num">Total</th><th>Invoice</th><th>Status</th><th>By</th></tr></thead><tbody>';
@@ -656,9 +709,27 @@ function viewFinance(v) {
   var its = itemsIn(S.sub), invValue = 0, burn = 0;
   its.forEach(function (it) { var dd = D(it.id); invValue += dd.value || 0; burn += (dd.rateBase * dd.perBase) || 0; });
   var spend90 = spendInLastDays(90, S.sub);
-  var spendAll = S.orders.filter(function (o) { return o.status === 'Received' && orderTouchesCat(o, S.sub); }).reduce(function (s, o) { return s + catShareOfOrder(o, S.sub); }, 0);
-  var html = subtabBar(counts) + '<div class="kpis">' + kpi('Inventory value', money(invValue), esc(S.sub) + ' on hand', 'accent') + kpi('Est. burn / month', money(burn), 'value consumed', '') + kpi('Spent (90 days)', money(spend90), esc(S.sub) + ' received', '') + kpi('Total spend', money(spendAll), 'all received', '') + '</div>';
-  html += '<div class="charts-grid">' + chartBox('Monthly spend — ' + S.sub, 'From received orders (6 months)', barChartSVG(spendSeries(6, S.sub), { color: 'var(--s2)', money: true })) + chartBox('Consumption value — ' + S.sub, 'Estimated value used per month', lineChartSVG(consumptionValueSeries(6, S.sub), { color: 'var(--s1)', money: true })) + chartBox('Spend by sub-category', 'Received orders, all time', donutSVG(spendBySubcat(S.sub))) + chartBox('Spend by supplier', 'Received orders, all time', barChartSVG(spendBySupplier(S.sub), { color: 'var(--s3)', money: true, horizontal: true })) + '</div>';
+  var recvOrders = S.orders.filter(function (o) { return o.status === 'Received' && orderTouchesCat(o, S.sub); });
+  var spendAll = recvOrders.reduce(function (s, o) { return s + catShareOfOrder(o, S.sub); }, 0);
+  var avgOrder = recvOrders.length ? spendAll / recvOrders.length : 0;
+  var runway = burn > 0 ? invValue / burn : null; // months of stock at current burn
+  var hh = stockHealth(S.sub);
+  var html = subtabBar(counts) + '<div class="kpis">' +
+    kpi('Inventory value', money(invValue), esc(S.sub) + ' on hand', 'accent') +
+    kpi('Est. burn / month', money(burn), 'value consumed', '') +
+    kpi('Stock runway', runway != null ? fmtPeriod(runway, false) : '—', 'at current burn', runway != null && runway < 1 ? 'danger' : '') +
+    kpi('Spent (90 days)', money(spend90), esc(S.sub) + ' received', '') +
+    kpi('Avg order value', money(avgOrder), recvOrders.length + ' received orders', '') +
+    kpi('Stock health', hh.ok + ' OK', hh.low + ' reorder · ' + hh.out + ' out', hh.out ? 'danger' : hh.low ? 'warn' : 'ok') + '</div>';
+  html += '<div class="charts-grid">' +
+    chartBox('Monthly spend — ' + S.sub, 'From received orders (6 months)', barChartSVG(spendSeries(6, S.sub), { color: 'var(--s2)', money: true })) +
+    chartBox('Consumption value — ' + S.sub, 'Estimated value used per month', lineChartSVG(consumptionValueSeries(6, S.sub), { color: 'var(--s1)', money: true })) +
+    chartBox('Spend by item', 'Top items by received-order spend', barChartSVG(spendByItem(S.sub), { color: 'var(--s2)', money: true, horizontal: true })) +
+    chartBox('Consumption value by item', 'Estimated value used, all time', barChartSVG(consumptionValueByItem(S.sub), { color: 'var(--s1)', money: true, horizontal: true })) +
+    chartBox('Spend by sub-category', 'Received orders, all time', donutSVG(spendBySubcat(S.sub))) +
+    chartBox('Stock value by sub-category', 'Current on-hand value', donutSVG(stockValueBySubcat(S.sub))) +
+    chartBox('Spend by supplier', 'Received orders, all time', barChartSVG(spendBySupplier(S.sub), { color: 'var(--s3)', money: true, horizontal: true })) +
+    chartBox('Orders per month', 'Order activity (6 months)', barChartSVG(ordersByMonth(6, S.sub), { color: 'var(--s7)' })) + '</div>';
   var top = its.map(function (it) { var dd = D(it.id); return { it: it, v: dd.value, burn: (dd.rateBase * dd.perBase) || 0 }; }).filter(function (x) { return x.v > 0 || x.burn > 0; }).sort(function (a, b) { return b.burn - a.burn; }).slice(0, 12);
   html += '<div class="card" style="margin-top:16px"><div class="card-h">' + ICON('finance', 18) + '<h3>Cost by item — ' + esc(S.sub) + '</h3></div><div class="card-b">';
   if (!top.length) html += emptyState('finance', 'No cost data yet', 'Add prices to items or record orders with prices.');
@@ -673,15 +744,20 @@ function viewFinance(v) {
 /* =================================================================== */
 function viewSuppliers(v) {
   var counts = {}; CATS.forEach(function (c) { counts[c] = S.suppliers.filter(function (s) { return s.category === c || s.category === 'Both' || !s.category; }).length; });
-  var html = subtabBar(counts) + '<div class="toolbar"><div class="search grow">' + ICON('search', 16) + '<input id="sup_q" placeholder="Search supplier, phone…"></div></div><div id="sup_res"></div>';
+  var html = subtabBar(counts) + '<div class="toolbar"><div class="search grow">' + ICON('search', 16) + '<input id="sup_q" placeholder="Search supplier, phone…"></div><button class="btn" id="sup_bulk">' + ICON('layers', 16) + 'Bulk</button></div><div id="sup_res"></div>';
   v.innerHTML = html; wireSubtabs(v);
-  $('#sup_q').addEventListener('input', debounce(renderSuppliers, 200)); renderSuppliers();
+  $('#sup_q').addEventListener('input', debounce(renderSuppliers, 200));
+  $('#sup_bulk').onclick = function () { bulkOpen('Suppliers', currentSuppliersFiltered(), function (s) { return { title: s.name, sub: (s.category || 'Both') + (s.orderFrequencyMonths ? ' · every ' + fmtPeriod(s.orderFrequencyMonths, true) : '') }; }); };
+  renderSuppliers();
 }
-function renderSuppliers() {
-  var q = ($('#sup_q').value || '').toLowerCase().trim();
+function currentSuppliersFiltered() {
+  var q = ($('#sup_q') && $('#sup_q').value || '').toLowerCase().trim();
   var rows = S.suppliers.filter(function (s) { return s.category === S.sub || s.category === 'Both' || !s.category; });
   if (q) rows = rows.filter(function (s) { return ((s.name || '') + ' ' + (s.phone || '') + ' ' + (s.contactPerson || '')).toLowerCase().indexOf(q) >= 0; });
-  rows.sort(by('name'));
+  return rows.sort(by('name'));
+}
+function renderSuppliers() {
+  var rows = currentSuppliersFiltered();
   var box = $('#sup_res');
   if (!rows.length) { box.innerHTML = emptyState('suppliers', 'No suppliers yet', 'Add the shops/firms you buy from.'); return; }
   var t = '<div class="cards-list">';
@@ -726,23 +802,61 @@ function viewSettings(v) {
 }
 function settingsListCard(key, title, hint) {
   var arr = listVal(key).slice().sort(function (a, b) { return String(a).toLowerCase() < String(b).toLowerCase() ? -1 : 1; });
-  return '<div class="card"><div class="card-h">' + ICON('tag', 18) + '<h3>' + esc(title) + '</h3></div><div class="card-b"><div class="hint" style="margin:0 0 10px">' + esc(hint) + '</div><div class="row" style="gap:6px" id="list_' + key + '">' + arr.map(function (x) { return '<span class="chip">' + esc(x) + ' <button class="iconbtn" style="width:20px;height:20px;border:none;background:transparent" data-del="' + escAttr(key + '|' + x) + '">' + ICON('x', 13) + '</button></span>'; }).join('') + '</div><div class="row mt8"><input id="add_' + key + '" placeholder="Add…" style="max-width:200px"><button class="btn sm" data-add="' + key + '">Add</button></div></div></div>';
+  return '<div class="card"><div class="card-h">' + ICON('tag', 18) + '<h3>' + esc(title) + '</h3></div><div class="card-b"><div class="hint" style="margin:0 0 10px">' + esc(hint) + ' Edits rename everywhere they are used.</div><div class="row" style="gap:6px" id="list_' + key + '">' + arr.map(function (x) { return '<span class="chip">' + esc(x) + ' <button class="iconbtn" style="width:19px;height:19px;border:none;background:transparent" data-editv="' + escAttr(key + '|' + x) + '" title="Rename">' + ICON('edit', 12) + '</button><button class="iconbtn" style="width:19px;height:19px;border:none;background:transparent" data-del="' + escAttr(key + '|' + x) + '" title="Remove">' + ICON('x', 13) + '</button></span>'; }).join('') + '</div><div class="row mt8"><input id="add_' + key + '" placeholder="Add…" style="max-width:200px"><button class="btn sm" data-add="' + key + '">Add</button></div></div></div>';
 }
 function wireSettingsLists(root) {
   $all('[data-add]', root).forEach(function (b) { b.onclick = function () { var k = b.dataset.add; var val = $('#add_' + k).value.trim(); if (val) { addToList(k, val); renderView(); } }; });
-  $all('[data-del]', root).forEach(function (b) { b.onclick = function () { var p = b.dataset.del.split('|'); removeFromList(p[0], p.slice(1).join('|')); renderView(); }; });
+  $all('[data-del]', root).forEach(function (b) { b.onclick = function () { var p = b.dataset.del.split('|'); var key = p[0], val = p.slice(1).join('|'); confirmBox({ title: 'Remove “' + esc(val) + '”?', ok: 'Remove', body: 'Removes it from the list. Records that already used it keep their text.', onOk: function () { removeFromList(key, val); renderView(); } }); }; });
+  $all('[data-editv]', root).forEach(function (b) { b.onclick = function () { var p = b.dataset.editv.split('|'); editListValue(p[0], p.slice(1).join('|')); }; });
+}
+function editListValue(key, val) {
+  var m = openModal('<div class="modal-h">' + ICON('edit', 20) + '<h3>Rename “' + esc(val) + '”</h3></div><div class="modal-b"><label>New name</label><input id="ev_name" value="' + esc(val) + '"><div class="hint">This renames it everywhere it is used across the dashboard.</div></div><div class="modal-f"><button class="btn ghost" data-x>Cancel</button><button class="btn primary" data-ok>Rename</button></div>');
+  $('[data-x]', m).onclick = closeModal;
+  $('[data-ok]', m).onclick = function () {
+    var nv = $('#ev_name', m).value.trim(); if (!nv || nv === val) { closeModal(); return; }
+    removeFromList(key, val); addToList(key, nv);
+    if (key === 'users') renamePersonEverywhere(val, nv);
+    else if (key === 'stationerySubcats' || key === 'pantrySubcats') renameSubcatEverywhere(val, nv);
+    else if (key === 'units') { var map = {}; map[val] = nv; applyUnitRename(map, function () { return true; }); }
+    closeModal(); toast('Renamed everywhere', 'ok'); renderView();
+  };
 }
 function unitSystemsCard() {
   var sys = unitSystems();
-  var body = sys.length ? sys.map(function (s, i) { return '<div class="rowcard" style="cursor:default;padding:10px 12px"><div class="rc-top"><div class="grow"><div class="item-name">' + esc(s.name) + '</div><div class="item-meta">' + s.levels.map(esc).join(' → ') + ' <span class="muted">(small → large)</span></div></div><button class="iconbtn" data-usdel="' + i + '">' + ICON('trash', 15) + '</button></div></div>'; }).join('') : '<div class="hint">No unit systems yet. Create one like Pcs → Pack → Box.</div>';
+  var body = sys.length ? sys.map(function (s, i) { var used = S.items.filter(function (it) { return it.unitSystem === s.name && String(it.active) !== 'false'; }).length; return '<div class="rowcard" style="cursor:default;padding:10px 12px"><div class="rc-top"><div class="grow"><div class="item-name">' + esc(s.name) + '</div><div class="item-meta">' + s.levels.map(esc).join(' → ') + ' <span class="muted">(small → large)' + (used ? ' · used by ' + used + ' item(s)' : '') + '</span></div></div><button class="iconbtn" data-usedit="' + i + '" title="Edit">' + ICON('edit', 15) + '</button><button class="iconbtn" data-usdel="' + i + '" title="Delete">' + ICON('trash', 15) + '</button></div></div>'; }).join('') : '<div class="hint">No unit systems yet. Create one like Pcs → Pack → Box.</div>';
   return '<div class="card"><div class="card-h">' + ICON('layers', 18) + '<h3>Unit systems</h3></div><div class="card-b"><div class="hint" style="margin:0 0 10px">A unit system is an ordered list of units from smallest to largest (e.g. Pcs, Pack, Box). Pick one on an item, then set how many of each fit in the next — per item.</div><div class="cards-list" style="gap:8px">' + body + '</div><div class="mt16"><label>New system name</label><input id="us_name" placeholder="e.g. Count (Pcs·Pack·Box)"><label class="mt8">Levels, smallest → largest (comma separated)</label><input id="us_levels" placeholder="Pcs, Pack, Box"><div class="row mt8"><button class="btn sm primary" id="us_add">Add system</button></div></div></div></div>';
 }
 function wireUnitSystems(root) {
-  $all('[data-usdel]', root).forEach(function (b) { b.onclick = function () { var sys = unitSystems().slice(); sys.splice(+b.dataset.usdel, 1); saveSetting('unitSystems', sys); renderView(); }; });
+  $all('[data-usdel]', root).forEach(function (b) { b.onclick = function () { var i = +b.dataset.usdel, s = unitSystems()[i]; var used = S.items.filter(function (it) { return it.unitSystem === s.name; }); confirmBox({ title: 'Delete unit system “' + esc(s.name) + '”?', danger: true, ok: 'Delete', body: used.length ? ('It is used by ' + used.length + ' item(s). They will keep their current conversions but become single/standalone (no longer tied to this system).') : 'This removes the system.', onOk: function () { var sys = unitSystems().slice(); sys.splice(i, 1); saveSetting('unitSystems', sys); var ch = []; used.forEach(function (it) { it.unitSystem = ''; ch.push(it); }); commitCascade(ch); renderView(); toast('Unit system deleted', 'ok'); } }); }; });
+  $all('[data-usedit]', root).forEach(function (b) { b.onclick = function () { editUnitSystem(+b.dataset.usedit); }; });
   if ($('#us_add', root)) $('#us_add', root).onclick = function () {
     var name = $('#us_name').value.trim(); var levels = $('#us_levels').value.split(',').map(function (x) { return x.trim(); }).filter(Boolean);
     if (!name || levels.length < 2) { toast('Give a name and at least 2 levels', 'err'); return; }
     var sys = unitSystems().slice(); sys.push({ name: name, levels: levels }); saveSetting('unitSystems', sys); renderView(); toast('Unit system added', 'ok');
+  };
+}
+function editUnitSystem(i) {
+  var sys = unitSystems(), s = sys[i]; if (!s) return;
+  var m = openModal('<div class="modal-h">' + ICON('layers', 20) + '<h3>Edit unit system</h3><button class="iconbtn" data-x>' + ICON('x', 17) + '</button></div><div class="modal-b"><label>System name</label><input id="us_ename" value="' + esc(s.name) + '"><label class="mt16">Levels (smallest → largest)</label><div id="us_levrows"></div><button class="btn sm mt8" id="us_addlev">' + ICON('plus', 14) + 'Add level</button><div class="hint mt8">Renaming a level updates it on every item that uses this system (and their records). Removing a level leaves those items\' own conversions intact.</div></div><div class="modal-f"><button class="btn ghost" data-x>Cancel</button><button class="btn primary" data-ok>Save</button></div>');
+  var rows = s.levels.slice();
+  function draw() { $('#us_levrows', m).innerHTML = rows.map(function (lv, k) { return '<div class="row mt8" data-lr="' + k + '"><input class="us_lev" data-k="' + k + '" value="' + esc(lv) + '" style="max-width:240px"><button class="iconbtn" data-lrm="' + k + '">' + ICON('x', 15) + '</button></div>'; }).join(''); $all('.us_lev', m).forEach(function (inp) { inp.oninput = function () { rows[+inp.dataset.k] = inp.value; }; }); $all('[data-lrm]', m).forEach(function (btn) { btn.onclick = function () { rows.splice(+btn.dataset.lrm, 1); draw(); }; }); }
+  draw();
+  $('#us_addlev', m).onclick = function () { $all('.us_lev', m).forEach(function (inp) { rows[+inp.dataset.k] = inp.value; }); rows.push(''); draw(); };
+  $all('[data-x]', m).forEach(function (b) { b.onclick = closeModal; });
+  $('[data-ok]', m).onclick = function () {
+    var newName = $('#us_ename', m).value.trim();
+    $all('.us_lev', m).forEach(function (inp) { rows[+inp.dataset.k] = inp.value.trim(); });
+    var newLevels = rows.filter(Boolean);
+    if (!newName || newLevels.length < 2) { toast('Name and at least 2 levels needed', 'err'); return; }
+    var oldName = s.name, oldLevels = s.levels.slice();
+    // positional rename map (old level -> new level) for cascade
+    var map = {}; for (var k = 0; k < Math.min(oldLevels.length, newLevels.length); k++) if (oldLevels[k] !== newLevels[k]) map[oldLevels[k]] = newLevels[k];
+    var sys2 = unitSystems().slice(); sys2[i] = { name: newName, levels: newLevels }; saveSetting('unitSystems', sys2);
+    // cascade to items on this system
+    var itemsCh = []; S.items.forEach(function (it) { if (it.unitSystem === oldName) it.unitSystem = newName; });
+    if (Object.keys(map).length) applyUnitRename(map, function (it) { return it.unitSystem === newName; });
+    else { S.items.forEach(function (it) { if (it.unitSystem === newName) itemsCh.push(it); }); commitCascade(itemsCh); }
+    closeModal(); toast('Unit system updated', 'ok'); renderView();
   };
 }
 
@@ -752,6 +866,54 @@ function wireUnitSystems(root) {
 function field(label, inner, hint, full) { return '<div' + (full ? ' class="full"' : '') + '><label>' + esc(label) + '</label>' + inner + (hint ? '<div class="hint">' + esc(hint) + '</div>' : '') + '</div>'; }
 function opts(arr, sel) { return arr.map(function (o) { return '<option' + (o === sel ? ' selected' : '') + '>' + esc(o) + '</option>'; }).join(''); }
 function detailRows(pairs) { return '<div class="card" style="box-shadow:none"><div class="card-b" style="padding:4px 16px">' + pairs.map(function (p) { return '<div class="detail-row"><span class="k">' + esc(p[0]) + '</span><span class="v">' + (p[1] == null ? '—' : p[1]) + '</span></div>'; }).join('') + '</div></div>'; }
+
+/* Reusable units editor: pick which units of a system to use (any subset),
+   set conversions between consecutive USED units. Blank/untick skips that unit
+   and the chain re-bridges (e.g. use Pcs & Box, skip Pack → "1 Box = ? Pcs"). */
+var _ueSeq = 0;
+function cssid(u) { return String(u).replace(/[^a-zA-Z0-9]/g, '_'); }
+function UnitsEditor(root, systemGetter, seed, onChange) {
+  var used = [], conv = {}, stockU = '', myid = 'ue' + (++_ueSeq);
+  function levels() { var s = systemGetter(); if (!s) return []; var sys = unitSystems().filter(function (x) { return x.name === s; })[0]; return sys ? sys.levels.slice() : []; }
+  function seedInit() {
+    var s = systemGetter();
+    if (!s) { used = [(seed && (seed.stockUnit || seed.unit)) || 'Pcs']; conv = {}; stockU = used[0]; return; }
+    var lv = levels(), f = seed ? factorsOf(seed) : {}, seedUnits = Object.keys(f).filter(function (u) { return lv.indexOf(u) >= 0; });
+    used = seedUnits.length ? lv.filter(function (u) { return seedUnits.indexOf(u) >= 0; }) : lv.slice();
+    conv = {}; for (var j = 1; j < used.length; j++) conv[used[j]] = (f[used[j]] && f[used[j - 1]]) ? round(f[used[j]] / f[used[j - 1]], 4) : '';
+    stockU = (seed && seed.stockUnit && used.indexOf(seed.stockUnit) >= 0) ? seed.stockUnit : used[0];
+  }
+  function grabConv() { $all('.' + myid + '_cv', root).forEach(function (inp) { conv[inp.dataset.u] = inp.value.trim() === '' ? '' : num(inp.value); }); }
+  function recompFromChecks() { var lv = levels(); used = lv.filter(function (u) { var cb = $('#' + myid + '_use_' + cssid(u), root); return cb ? cb.checked : true; }); if (!used.length) used = lv.slice(0, 1); if (stockU && used.indexOf(stockU) < 0) stockU = used[0]; }
+  function render() {
+    var s = systemGetter();
+    if (!s) {
+      root.innerHTML = '<div class="form-grid">' + field('Unit', '<input id="' + myid + '_single" list="dl_' + myid + '" value="' + esc(used[0] || 'Pcs') + '"><datalist id="dl_' + myid + '">' + listVal('units').map(function (u) { return '<option>' + esc(u) + '</option>'; }).join('') + '</datalist>') + '</div>';
+      $('#' + myid + '_single', root).addEventListener('input', function () { used = [$('#' + myid + '_single', root).value.trim() || 'Pcs']; stockU = used[0]; onChange && onChange(); });
+      onChange && onChange(); return;
+    }
+    var lv = levels();
+    var checks = '<div class="row" style="gap:16px;margin-bottom:8px">' + lv.map(function (u) { return '<label style="display:flex;align-items:center;gap:6px;font-weight:600;margin:0"><input type="checkbox" id="' + myid + '_use_' + cssid(u) + '" ' + (used.indexOf(u) >= 0 ? 'checked' : '') + ' style="width:auto"> ' + esc(u) + '</label>'; }).join('') + '</div>';
+    var convHtml = ''; for (var j = 1; j < used.length; j++) convHtml += field('1 ' + used[j] + ' = ? ' + used[j - 1], '<input class="' + myid + '_cv" data-u="' + esc(used[j]) + '" type="number" inputmode="decimal" value="' + esc(conv[used[j]] != null ? conv[used[j]] : '') + '">');
+    root.innerHTML = '<div class="hint" style="margin:2px 0 8px">Tick the units you use for this item; set how many of the smaller fit in the next used one. Untick (or leave blank) to skip a unit — e.g. use Pcs &amp; Box, skip Pack.</div>' + checks + '<div class="form-grid">' + convHtml + '</div><div class="form-grid mt8">' + field('Track stock in', '<select id="' + myid + '_stock">' + opts(used, stockU) + '</select>') + '</div>';
+    lv.forEach(function (u) { var cb = $('#' + myid + '_use_' + cssid(u), root); if (cb) cb.onchange = function () { grabConv(); recompFromChecks(); render(); onChange && onChange(); }; });
+    $all('.' + myid + '_cv', root).forEach(function (inp) { inp.addEventListener('input', function () { conv[inp.dataset.u] = inp.value.trim() === '' ? '' : num(inp.value); onChange && onChange(); }); });
+    if ($('#' + myid + '_stock', root)) $('#' + myid + '_stock', root).onchange = function () { stockU = $('#' + myid + '_stock', root).value; onChange && onChange(); };
+    onChange && onChange();
+  }
+  function compute() {
+    var s = systemGetter();
+    if (!s) { var u = (used[0] || 'Pcs'); var f0 = {}; f0[u] = 1; return { factors: f0, used: [u], base: u, stockUnit: u }; }
+    grabConv();
+    var u2 = used.slice(), stable = false;
+    while (!stable && u2.length > 1) { stable = true; for (var j = 1; j < u2.length; j++) { if (!(num(conv[u2[j]]) > 0)) { u2.splice(j, 1); stable = false; break; } } }
+    var f = {}; f[u2[0]] = 1; for (var k = 1; k < u2.length; k++) f[u2[k]] = f[u2[k - 1]] * num(conv[u2[k]]);
+    var su = (stockU && u2.indexOf(stockU) >= 0) ? stockU : u2[0];
+    return { factors: f, used: u2, base: u2[0], stockUnit: su };
+  }
+  seedInit();
+  return { render: render, compute: compute, setSystem: function () { seedInit(); render(); }, usedUnits: function () { return compute().used; }, stockUnit: function () { return compute().stockUnit; } };
+}
 
 /* ---- ITEM (with unit system) ---- */
 function itemForm(item) {
@@ -784,49 +946,25 @@ function itemForm(item) {
   var m = openModal(html, { wide: true });
   $('#f_cat', m).onchange = function () { $('#dl_sub', m).innerHTML = subcatsFor($('#f_cat', m).value).map(function (s) { return '<option>' + esc(s) + '</option>'; }).join(''); };
 
-  function levelsForSystem(name) { var s = sysList.filter(function (x) { return x.name === name; })[0]; return s ? s.levels.slice() : []; }
-  function drawUnits() {
-    var sysName = $('#f_usys', m).value, box = $('#f_units', m);
-    if (!sysName) {
-      var singleUnit = (item.unitSystem ? '' : (item.stockUnit || item.unit || 'Pcs'));
-      box.innerHTML = '<div class="form-grid">' + field('Unit', '<input id="f_unit" list="dl_unit" value="' + esc(singleUnit || 'Pcs') + '"><datalist id="dl_unit">' + listVal('units').map(function (u) { return '<option>' + esc(u) + '</option>'; }).join('') + '</datalist>') + '</div>';
-      refreshUnitPickers();
-      $('#f_unit', m).addEventListener('input', refreshUnitPickers);
-      return;
-    }
-    var levels = levelsForSystem(sysName), curF = factorsOf(item);
-    var conv = '';
-    for (var i = 0; i < levels.length - 1; i++) {
-      var per = (curF[levels[i + 1]] && curF[levels[i]]) ? round(curF[levels[i + 1]] / curF[levels[i]], 4) : '';
-      conv += field('1 ' + levels[i + 1] + ' = ? ' + levels[i], '<input class="f_per" data-i="' + i + '" type="number" inputmode="decimal" value="' + esc(per) + '">');
-    }
-    box.innerHTML = '<div class="hint" style="margin:2px 0 10px">Levels: ' + levels.map(esc).join(' → ') + '. Set how many of the smaller fit in the larger.</div><div class="form-grid">' + conv + '</div>' +
-      '<div class="form-grid mt8">' + field('Track stock in', '<select id="f_stockU">' + opts(levels, item.stockUnit || levels[0]) + '</select>') + '</div>';
-    $('#f_stockU', m).onchange = refreshUnitPickers;
-    $all('.f_per', m).forEach(function (inp) { inp.addEventListener('input', refreshUnitPickers); });
-    refreshUnitPickers();
-  }
-  function currentLevels() { var sysName = $('#f_usys', m).value; if (!sysName) { var u = $('#f_unit', m) ? $('#f_unit', m).value.trim() || 'Pcs' : 'Pcs'; return [u]; } return levelsForSystem(sysName); }
-  function currentStockUnit() { var sysName = $('#f_usys', m).value; if (!sysName) return $('#f_unit', m) ? ($('#f_unit', m).value.trim() || 'Pcs') : 'Pcs'; return $('#f_stockU', m) ? $('#f_stockU', m).value : currentLevels()[0]; }
-  function refreshUnitPickers() {
-    var levels = currentLevels(), su = currentStockUnit();
+  var ue = UnitsEditor($('#f_units', m), function () { return $('#f_usys', m).value; }, item, function () {
+    var inc = ue.usedUnits(), su = ue.stockUnit();
     if ($('#f_openU', m)) $('#f_openU', m).textContent = su;
-    var nu = $('#f_needu', m); var prev = nu.value || item.needUnit || su; nu.innerHTML = opts(levels, levels.indexOf(prev) >= 0 ? prev : su);
-  }
-  $('#f_usys', m).onchange = drawUnits; drawUnits();
+    var nu = $('#f_needu', m); if (nu) { var prev = nu.value || item.needUnit || su; nu.innerHTML = opts(inc, inc.indexOf(prev) >= 0 ? prev : su); }
+  });
+  ue.render();
+  $('#f_usys', m).onchange = function () { ue.setSystem(); };
 
   $all('[data-x]', m).forEach(function (b) { b.onclick = closeModal; });
   if ($('[data-del]', m)) $('[data-del]', m).onclick = function () { confirmDelete('Items', item, item.name); };
   $('[data-save]', m).onclick = function () {
     var name = $('#f_name', m).value.trim(); if (!name) { toast('Item name is required', 'err'); return; }
-    var sysName = $('#f_usys', m).value, levels = currentLevels(), su = currentStockUnit(), factors = {};
-    if (!sysName) { factors[levels[0]] = 1; addToList('units', levels[0]); }
-    else { factors[levels[0]] = 1; var pers = {}; $all('.f_per', m).forEach(function (inp) { pers[+inp.dataset.i] = num(inp.value) || 1; }); for (var i = 0; i < levels.length - 1; i++) factors[levels[i + 1]] = factors[levels[i]] * (pers[i] || 1); }
-    var needU = $('#f_needu', m).value || su;
+    var sysName = $('#f_usys', m).value, U = ue.compute();
+    if (!sysName) addToList('units', U.base);
+    var needU = $('#f_needu', m).value || U.stockUnit;
     var rec = Object.assign({}, item, {
       category: $('#f_cat', m).value, subcategory: $('#f_sub', m).value.trim(), name: name, brand: $('#f_brand', m).value.trim(),
       supplierId: $('#f_sup', m).value,
-      unitSystem: sysName, baseUnit: levels[0], stockUnit: su, unit: su, factorsJSON: JSON.stringify(factors),
+      unitSystem: sysName, baseUnit: U.base, stockUnit: U.stockUnit, unit: U.stockUnit, factorsJSON: JSON.stringify(U.factors),
       openingStock: num($('#f_open', m).value), unitCost: $('#f_cost', m).value.trim(),
       needQty: $('#f_needq', m).value.trim(), needUnit: needU, needPeriodMonths: monthsFromMD($('#f_needM', m).value, $('#f_needD', m).value),
       needText: ($('#f_needq', m).value.trim() ? $('#f_needq', m).value.trim() + ' ' + needU + ' / ' + fmtPeriod(monthsFromMD($('#f_needM', m).value, $('#f_needD', m).value), true) : ''),
@@ -1030,6 +1168,132 @@ function confirmDelete(entity, rec, label) {
 }
 
 /* =================================================================== */
+/*  BULK EDIT / DELETE                                                 */
+/* =================================================================== */
+function fieldA(id, label, inner, hint, full) { return '<div' + (full ? ' class="full"' : '') + '><label style="display:flex;align-items:center;gap:8px;margin-bottom:5px"><input type="checkbox" class="ba" data-f="' + id + '" style="width:auto">' + esc(label) + '</label>' + inner + (hint ? '<div class="hint">' + esc(hint) + '</div>' : '') + '</div>'; }
+function applied(m, id) { var cb = $('.ba[data-f="' + id + '"]', m); return !!(cb && cb.checked); }
+function bulkOpen(entity, rows, labelFn) {
+  if (!rows || !rows.length) { toast('Nothing to select here.', 'warn'); return; }
+  var sel = {};
+  function n() { var c = 0; for (var k in sel) if (sel[k]) c++; return c; }
+  var listHtml = rows.map(function (r) { var l = labelFn(r); return '<label class="rowcard" style="display:flex;gap:10px;align-items:center;cursor:pointer;padding:9px 12px;box-shadow:none"><input type="checkbox" class="bk" data-id="' + esc(r.id) + '" style="width:auto"><div class="grow" style="min-width:0"><div class="item-name">' + esc(l.title) + '</div><div class="item-meta">' + esc(l.sub) + '</div></div></label>'; }).join('');
+  var m = openModal('<div class="modal-h">' + ICON('overview', 20) + '<h3>Bulk — select</h3><button class="iconbtn" data-x>' + ICON('x', 17) + '</button></div><div class="modal-b"><div class="row" style="margin-bottom:10px;align-items:center"><label style="display:flex;align-items:center;gap:8px;font-weight:600;margin:0"><input type="checkbox" id="bk_all" style="width:auto">Select all (' + rows.length + ')</label><span style="flex:1"></span><span id="bk_n" class="chip">0 selected</span></div><div class="cards-list" style="gap:6px">' + listHtml + '</div></div><div class="modal-f"><button class="btn danger left" data-del disabled>' + ICON('trash', 15) + 'Delete</button><button class="btn ghost" data-x>Cancel</button><button class="btn primary" data-edit disabled>' + ICON('edit', 15) + 'Edit</button></div>', { wide: true, sticky: true });
+  function refresh() { var c = n(); $('#bk_n', m).textContent = c + ' selected'; $('[data-edit]', m).disabled = !c; $('[data-del]', m).disabled = !c; }
+  $all('.bk', m).forEach(function (cb) { cb.onchange = function () { sel[cb.dataset.id] = cb.checked; refresh(); }; });
+  $('#bk_all', m).onchange = function () { var v = $('#bk_all', m).checked; $all('.bk', m).forEach(function (cb) { cb.checked = v; sel[cb.dataset.id] = v; }); refresh(); };
+  $all('[data-x]', m).forEach(function (b) { b.onclick = closeModal; });
+  $('[data-del]', m).onclick = function () { var ids = rows.filter(function (r) { return sel[r.id]; }).map(function (r) { return r.id; }); if (!ids.length) return; confirmBox({ title: 'Delete ' + ids.length + ' record(s)?', danger: true, ok: 'Delete', body: 'Permanently removes them for everyone, and their effect across the dashboard. Cannot be undone.', onOk: function () { closeModal(); persistManyDelete(entity, ids).then(function () { toast('Deleted ' + ids.length, 'ok'); }); } }); };
+  $('[data-edit]', m).onclick = function () { var recs = rows.filter(function (r) { return sel[r.id]; }); if (!recs.length) return; closeModal(); bulkEditForm(entity, recs); };
+}
+function bulkEditForm(entity, records) { if (entity === 'Items') return bulkEditItems(records); if (entity === 'Orders') return bulkEditOrders(records); if (entity === 'Suppliers') return bulkEditSuppliers(records); if (entity === 'Consumption') return bulkEditConsumption(records); }
+
+function bulkEditItems(records) {
+  var sups = S.suppliers.slice().sort(by('name')), sysList = unitSystems(), allSub = [];
+  CATS.forEach(function (c) { subcatsFor(c).forEach(function (s) { if (allSub.indexOf(s) < 0) allSub.push(s); }); });
+  var html = '<div class="modal-h">' + ICON('overview', 20) + '<h3>Bulk edit ' + records.length + ' item(s)</h3><button class="iconbtn" data-x>' + ICON('x', 17) + '</button></div><div class="modal-b"><div class="hint" style="margin-top:0">Tick a field to apply its value to all ' + records.length + ' selected items. Unticked fields are left unchanged.</div><div class="form-grid mt16">' +
+    fieldA('category', 'Category', '<select id="b_cat">' + opts(CATS, CATS[0]) + '</select>') +
+    fieldA('subcategory', 'Sub-category', '<input id="b_sub" list="b_dlsub"><datalist id="b_dlsub">' + allSub.map(function (s) { return '<option>' + esc(s) + '</option>'; }).join('') + '</datalist>') +
+    fieldA('brand', 'Brand', '<input id="b_brand">') +
+    fieldA('supplierId', 'Preferred supplier', '<select id="b_sup"><option value="">— none —</option>' + sups.map(function (s) { return '<option value="' + esc(s.id) + '">' + esc(s.name) + '</option>'; }).join('') + '</select>') +
+    fieldA('reorderThresholdPct', 'Reorder threshold %', '<input id="b_thr" type="number">') +
+    fieldA('unitCost', 'Unit cost (per stock unit)', '<input id="b_cost" type="number">') +
+    fieldA('needQty', 'Need quantity', '<input id="b_needq" type="number">') +
+    fieldA('needPeriod', 'Need period (M / D)', '<div class="row"><input id="b_needM" type="number" placeholder="Months" style="max-width:120px"><input id="b_needD" type="number" placeholder="Days" style="max-width:120px"></div>') +
+    fieldA('active', 'Active', '<select id="b_active"><option value="true">Active</option><option value="false">Inactive</option></select>') +
+    fieldA('notes', 'Notes', '<input id="b_notes">', null, true) +
+    '</div><div class="section-title mt16"><label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-size:13px"><input type="checkbox" class="ba" data-f="units" style="width:auto">Set up units for all selected</label></div><div id="b_unitsblock" style="opacity:.45;pointer-events:none"><div class="form-grid">' + field('Unit system', '<select id="b_usys"><option value="">Single unit</option>' + sysList.map(function (s) { return '<option>' + esc(s.name) + '</option>'; }).join('') + '</select>') + '</div><div id="b_units"></div><div class="form-grid mt8">' + field('Need unit', '<select id="b_needu"><option value="">— use stock unit —</option></select>') + '</div></div></div><div class="modal-f"><button class="btn ghost" data-x>Cancel</button><button class="btn primary" data-ok>Apply to ' + records.length + '</button></div>';
+  var m = openModal(html, { wide: true });
+  var ue = UnitsEditor($('#b_units', m), function () { return $('#b_usys', m).value; }, {}, function () { var inc = ue.usedUnits(), nu = $('#b_needu', m); if (nu) { var prev = nu.value; nu.innerHTML = '<option value="">— use stock unit —</option>' + inc.map(function (u) { return '<option' + (u === prev ? ' selected' : '') + '>' + esc(u) + '</option>'; }).join(''); } });
+  ue.render(); $('#b_usys', m).onchange = function () { ue.setSystem(); };
+  var ucb = $('.ba[data-f="units"]', m); ucb.onchange = function () { var b = $('#b_unitsblock', m); b.style.opacity = ucb.checked ? '1' : '.45'; b.style.pointerEvents = ucb.checked ? 'auto' : 'none'; };
+  $all('[data-x]', m).forEach(function (b) { b.onclick = closeModal; });
+  $('[data-ok]', m).onclick = function () {
+    var patch = {};
+    if (applied(m, 'category')) patch.category = $('#b_cat', m).value;
+    if (applied(m, 'subcategory')) patch.subcategory = $('#b_sub', m).value.trim();
+    if (applied(m, 'brand')) patch.brand = $('#b_brand', m).value.trim();
+    if (applied(m, 'supplierId')) patch.supplierId = $('#b_sup', m).value;
+    if (applied(m, 'reorderThresholdPct')) patch.reorderThresholdPct = $('#b_thr', m).value.trim();
+    if (applied(m, 'unitCost')) patch.unitCost = $('#b_cost', m).value.trim();
+    if (applied(m, 'needQty')) patch.needQty = $('#b_needq', m).value.trim();
+    if (applied(m, 'needPeriod')) patch.needPeriodMonths = monthsFromMD($('#b_needM', m).value, $('#b_needD', m).value);
+    if (applied(m, 'active')) patch.active = $('#b_active', m).value;
+    if (applied(m, 'notes')) patch.notes = $('#b_notes', m).value.trim();
+    var unitsOn = applied(m, 'units'), U = unitsOn ? ue.compute() : null, needuSel = unitsOn ? $('#b_needu', m).value : '';
+    if (!Object.keys(patch).length && !unitsOn) { toast('Tick at least one field to apply.', 'warn'); return; }
+    var recs = records.map(function (r) {
+      var it = Object.assign({}, r, patch);
+      if (unitsOn) { it.unitSystem = $('#b_usys', m).value; it.baseUnit = U.base; it.stockUnit = U.stockUnit; it.unit = U.stockUnit; it.factorsJSON = JSON.stringify(U.factors); it.needUnit = needuSel || U.stockUnit; }
+      if (applied(m, 'needQty') || applied(m, 'needPeriod') || unitsOn) it.needText = (it.needQty ? it.needQty + ' ' + (it.needUnit || stockUnitOf(it)) + ' / ' + fmtPeriod(it.needPeriodMonths, true) : '');
+      return it;
+    });
+    closeModal(); persistManyUpdate('Items', recs).then(function () { toast('Updated ' + recs.length + ' item(s)', 'ok'); });
+  };
+}
+function bulkEditOrders(records) {
+  var sups = S.suppliers.slice().sort(by('name'));
+  var html = '<div class="modal-h">' + ICON('orders', 20) + '<h3>Bulk edit ' + records.length + ' order(s)</h3><button class="iconbtn" data-x>' + ICON('x', 17) + '</button></div><div class="modal-b"><div class="hint" style="margin-top:0">Tick a field to apply it to all selected orders.</div><div class="form-grid mt16">' +
+    fieldA('status', 'Status', '<select id="b_status">' + opts(['Draft', 'Ordered', 'Received', 'Cancelled'], 'Ordered') + '</select>', 'Received adds quantities to stock.') +
+    fieldA('supplier', 'Supplier', '<select id="b_sup"><option value="">—</option>' + sups.map(function (s) { return '<option value="' + esc(s.id) + '">' + esc(s.name) + '</option>'; }).join('') + '</select>') +
+    fieldA('orderedBy', 'Ordered by', '<input id="b_by">') +
+    fieldA('date', 'Order date', '<input id="b_date" type="date" value="' + today() + '">') +
+    fieldA('receivedDate', 'Received date', '<input id="b_recv" type="date" value="' + today() + '">') +
+    '</div></div><div class="modal-f"><button class="btn ghost" data-x>Cancel</button><button class="btn primary" data-ok>Apply to ' + records.length + '</button></div>';
+  var m = openModal(html);
+  $all('[data-x]', m).forEach(function (b) { b.onclick = closeModal; });
+  $('[data-ok]', m).onclick = function () {
+    var patch = {};
+    if (applied(m, 'status')) patch.status = $('#b_status', m).value;
+    if (applied(m, 'supplier')) { var s = supplierById($('#b_sup', m).value); patch.supplierId = $('#b_sup', m).value; patch.supplierName = s ? s.name : ''; }
+    if (applied(m, 'orderedBy')) patch.orderedBy = $('#b_by', m).value.trim();
+    if (applied(m, 'date')) patch.date = $('#b_date', m).value;
+    if (applied(m, 'receivedDate')) patch.receivedDate = $('#b_recv', m).value;
+    if (!Object.keys(patch).length) { toast('Tick at least one field.', 'warn'); return; }
+    var recs = records.map(function (r) { var o = Object.assign({}, r, patch); if (patch.status === 'Received' && !o.receivedDate) o.receivedDate = today(); return o; });
+    closeModal(); persistManyUpdate('Orders', recs).then(function () { toast('Updated ' + recs.length + ' order(s)', 'ok'); });
+  };
+}
+function bulkEditSuppliers(records) {
+  var fm0 = '', fd0 = '';
+  var html = '<div class="modal-h">' + ICON('suppliers', 20) + '<h3>Bulk edit ' + records.length + ' supplier(s)</h3><button class="iconbtn" data-x>' + ICON('x', 17) + '</button></div><div class="modal-b"><div class="hint" style="margin-top:0">Tick a field to apply it to all selected suppliers.</div><div class="form-grid mt16">' +
+    fieldA('category', 'Supplies', '<select id="b_cat">' + opts(['Both', 'Stationery', 'Pantry'], 'Both') + '</select>') +
+    fieldA('freq', 'Order frequency (M / D)', '<div class="row"><input id="b_fm" type="number" placeholder="Months" style="max-width:120px"><input id="b_fd" type="number" placeholder="Days" style="max-width:120px"></div>') +
+    fieldA('contactPerson', 'Contact person', '<input id="b_contact">') +
+    fieldA('phone', 'Phone', '<input id="b_phone">') +
+    '</div></div><div class="modal-f"><button class="btn ghost" data-x>Cancel</button><button class="btn primary" data-ok>Apply to ' + records.length + '</button></div>';
+  var m = openModal(html);
+  $all('[data-x]', m).forEach(function (b) { b.onclick = closeModal; });
+  $('[data-ok]', m).onclick = function () {
+    var patch = {};
+    if (applied(m, 'category')) patch.category = $('#b_cat', m).value;
+    if (applied(m, 'freq')) patch.orderFrequencyMonths = monthsFromMD($('#b_fm', m).value, $('#b_fd', m).value);
+    if (applied(m, 'contactPerson')) patch.contactPerson = $('#b_contact', m).value.trim();
+    if (applied(m, 'phone')) patch.phone = $('#b_phone', m).value.trim();
+    if (!Object.keys(patch).length) { toast('Tick at least one field.', 'warn'); return; }
+    var recs = records.map(function (r) { return Object.assign({}, r, patch); });
+    closeModal(); persistManyUpdate('Suppliers', recs).then(function () { toast('Updated ' + recs.length + ' supplier(s)', 'ok'); });
+  };
+}
+function bulkEditConsumption(records) {
+  var users = listVal('users');
+  var html = '<div class="modal-h">' + ICON('record', 20) + '<h3>Bulk edit ' + records.length + ' entr(y/ies)</h3><button class="iconbtn" data-x>' + ICON('x', 17) + '</button></div><div class="modal-b"><div class="hint" style="margin-top:0">Tick a field to apply it to all selected entries.</div><div class="form-grid mt16">' +
+    fieldA('date', 'Date', '<input id="b_date" type="date" value="' + today() + '">') +
+    fieldA('enteredBy', 'Entered by', '<input id="b_by" list="b_dlu"><datalist id="b_dlu">' + users.map(function (u) { return '<option>' + esc(u) + '</option>'; }).join('') + '</datalist>') +
+    '</div></div><div class="modal-f"><button class="btn ghost" data-x>Cancel</button><button class="btn primary" data-ok>Apply to ' + records.length + '</button></div>';
+  var m = openModal(html);
+  $all('[data-x]', m).forEach(function (b) { b.onclick = closeModal; });
+  $('[data-ok]', m).onclick = function () {
+    var patch = {};
+    if (applied(m, 'date')) patch.date = $('#b_date', m).value;
+    if (applied(m, 'enteredBy')) patch.enteredBy = $('#b_by', m).value.trim();
+    if (!Object.keys(patch).length) { toast('Tick at least one field.', 'warn'); return; }
+    var recs = records.map(function (r) { return Object.assign({}, r, patch); });
+    closeModal(); persistManyUpdate('Consumption', recs).then(function () { toast('Updated ' + recs.length + ' entr(y/ies)', 'ok'); });
+  };
+}
+function itemBulkLabel(it) { return { title: it.name, sub: (it.subcategory || '') + ' · ' + qtyDisp(it, D(it.id).currentBase) }; }
+
+/* =================================================================== */
 /*  ANALYTICS SERIES                                                   */
 /* =================================================================== */
 function monthKeys(n) { var arr = [], d = new Date(); d.setDate(1); for (var i = n - 1; i >= 0; i--) { var mo = new Date(d.getFullYear(), d.getMonth() - i, 1); arr.push({ key: mo.getFullYear() + '-' + (mo.getMonth() + 1), label: mo.toLocaleDateString('en-IN', { month: 'short' }) }); } return arr; }
@@ -1040,6 +1304,11 @@ function catShareOfOrder(o, cat) { var lines = parseLines(o.linesJSON); var sub 
 function spendInLastDays(days, cat) { var since = toDate(today()).getTime() - days * 86400000; return S.orders.filter(function (o) { return o.status === 'Received' && toDate(o.receivedDate || o.date) && toDate(o.receivedDate || o.date).getTime() >= since; }).reduce(function (s, o) { return s + (cat ? catShareOfOrder(o, cat) : num(o.total)); }, 0); }
 function spendBySubcat(cat) { var map = {}; S.orders.forEach(function (o) { if (o.status !== 'Received') return; parseLines(o.linesJSON).forEach(function (ln) { var it = itemById(ln.itemId); if (!it || it.category !== cat) return; var k = it.subcategory || 'Other'; map[k] = (map[k] || 0) + num(ln.amount || num(ln.qty) * num(ln.unitPrice)); }); }); return Object.keys(map).map(function (k) { return { label: k, value: round(map[k], 2) }; }).sort(function (a, b) { return b.value - a.value; }); }
 function spendBySupplier(cat) { var map = {}; S.orders.forEach(function (o) { if (o.status !== 'Received') return; var v = cat ? catShareOfOrder(o, cat) : num(o.total); if (v <= 0) return; var k = o.supplierName || 'Unknown'; map[k] = (map[k] || 0) + v; }); return Object.keys(map).map(function (k) { return { label: k, value: round(map[k], 2) }; }).sort(function (a, b) { return b.value - a.value; }).slice(0, 8); }
+function spendByItem(cat) { var map = {}; S.orders.forEach(function (o) { if (o.status !== 'Received') return; parseLines(o.linesJSON).forEach(function (ln) { var it = itemById(ln.itemId); if (!it || (cat && it.category !== cat)) return; map[it.name] = (map[it.name] || 0) + num(ln.amount || num(ln.qty) * num(ln.unitPrice)); }); }); return Object.keys(map).map(function (k) { return { label: k, value: round(map[k], 2) }; }).sort(function (a, b) { return b.value - a.value; }).slice(0, 8); }
+function consumptionValueByItem(cat) { var out = []; S.items.forEach(function (it) { if (cat && it.category !== cat) return; var dd = D(it.id); var v = (dd.consumed || 0) * (dd.perBase || 0); if (v > 0) out.push({ label: it.name, value: round(v, 2) }); }); return out.sort(function (a, b) { return b.value - a.value; }).slice(0, 8); }
+function stockValueBySubcat(cat) { var map = {}; itemsIn(cat).forEach(function (it) { var v = D(it.id).value || 0; if (v <= 0) return; var k = it.subcategory || 'Other'; map[k] = (map[k] || 0) + v; }); return Object.keys(map).map(function (k) { return { label: k, value: round(map[k], 2) }; }).sort(function (a, b) { return b.value - a.value; }); }
+function ordersByMonth(n, cat) { var mk = monthKeys(n), map = {}; mk.forEach(function (m) { map[m.key] = 0; }); S.orders.forEach(function (o) { if (cat && !orderTouchesCat(o, cat)) return; var d = toDate(o.date); if (!d) return; var k = d.getFullYear() + '-' + (d.getMonth() + 1); if (map[k] != null) map[k]++; }); return mk.map(function (m) { return { label: m.label, value: map[m.key] }; }); }
+function stockHealth(cat) { var c = { ok: 0, low: 0, out: 0 }; itemsIn(cat).forEach(function (it) { var s = D(it.id).status; if (s === 'out') c.out++; else if (s === 'low' || s === 'critical') c.low++; else c.ok++; }); return c; }
 
 /* =================================================================== */
 /*  CHARTS                                                             */
